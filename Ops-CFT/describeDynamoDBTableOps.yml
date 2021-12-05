@@ -1,0 +1,98 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Operations: Alert topic template'
+Parameters:
+  DynamoDbTableName:
+    Type: String
+    Description: Provide valid DynamoDb Table name
+    Default: ''
+  SNSTopicARN:
+    Type: String
+    Description: Provide valid SNS topic ARN
+    Default: ''
+
+Resources:
+  DescribeDynamoDbLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !Sub '${DescribeDynamoDbLambdaExecutionRole.Arn}'
+      Handler: index.lambda_handler
+      Timeout: 5
+      Runtime: python3.7
+      Environment:
+        Variables:
+          DynamoDbTableName: !Ref DynamoDbTableName
+          SNSTopicARN: !Ref SNSTopicARN
+      Code:
+        ZipFile: !Sub |
+         import json
+         import os, boto3, botocore
+         import cfnresponse
+         dynamodb_client = boto3.client('dynamodb')
+         sns = boto3.client('sns')
+         def lambda_handler(event, context):
+           DynamoDbTableName = os.environ['DynamoDbTableName']
+           print("DynamoDbTableName :: " + DynamoDbTableName)
+           SNSTopicARN = os.environ['SNSTopicARN']
+           print(SNSTopicARN)
+           subject = "DynamoDb Table description"
+           table_obj = describe_table(table_name=DynamoDbTableName)
+           message = ""
+           if table_obj == None :
+              message = "Table Not Found"
+           else:
+              message = table_obj
+           publish_sns(topicarn=SNSTopicARN, subject=subject, message=message)
+           cfnresponse.send(event, context, cfnresponse.SUCCESS, None)
+
+         def describe_table(table_name):
+           table_obj = None
+           try:
+             response = dynamodb_client.describe_table(
+               TableName=table_name
+             )
+             table_status = response.get('Table').get('TableStatus')
+             item_count = response.get('Table').get('ItemCount')
+             table_obj = "Table Name : " + table_name + " | TableStatus : " + table_status + " | ItemCount : " + str(item_count)
+           except botocore.exceptions.ClientError as e:
+             if "AccessDenied" in str(e):
+               print("AccessDenied")
+           print(table_obj)
+           return table_obj
+
+         def publish_sns(topicarn, subject, message):
+           response = sns.publish(
+             TargetArn=topicarn,
+             Subject=subject,
+             Message=message
+           )
+           print(response)
+
+  Primerinvoke:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: DescribeDynamoDbLambdaFunction
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt DescribeDynamoDbLambdaFunction.Arn
+
+  DescribeDynamoDbLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: ['sts:AssumeRole']
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: DescribeDynamoDBPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: DynamoDb
+                Effect: Allow
+                Action:
+                  - 'dynamodb:DescribeTable'
+                  - 'SNS:Publish'
+                Resource: '*'

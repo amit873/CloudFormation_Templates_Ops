@@ -1,0 +1,101 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Operations: Alert topic template'
+Parameters:
+  CldFrontDistId:
+    Type: String
+    Description: Provide valid Cloudfront Distribution ID to get the status
+    Default: ''
+  SNSTopicARN:
+    Type: String
+    Description: Provide valid SNS topic ARN
+    Default: ''
+
+Resources:
+  CldFrontGetDistributionStatusLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !Sub '${CldFrontLambdaExecutionRole.Arn}'
+      Handler: index.lambda_handler
+      Timeout: 5
+      Runtime: python3.7
+      Environment:
+        Variables:
+          CldFrontDistId: !Ref CldFrontDistId
+          SNSTopicARN: !Ref SNSTopicARN
+      Code:
+        ZipFile: !Sub |
+         import json
+         import os, boto3, botocore
+         import cfnresponse
+         cloudfront = boto3.client('cloudfront')
+         sns = boto3.client('sns')
+         def lambda_handler(event, context):
+           CldFrontDistId = os.environ['CldFrontDistId']
+           print("CldFrontDistId :: " + CldFrontDistId)
+           SNSTopicARN = os.environ['SNSTopicARN']
+           print(SNSTopicARN)
+
+           distribution_obj = describe_distribution(id=CldFrontDistId)
+           subject = "CloudFront Distribution Status"
+           message = ""
+           if distribution_obj == None :
+             message = "Distibution Not found"
+           else:
+             message = distribution_obj
+           publish_sns(topicarn=SNSTopicARN, subject=subject, message=message)
+           cfnresponse.send(event, context, cfnresponse.SUCCESS, None)
+           
+         def describe_distribution(id):
+           distribution_obj = None
+           try:
+             response = cloudfront.get_distribution(
+               Id=id
+             )
+             print(response)
+             status = response.get('Distribution').get('Status')
+             distribution_obj = "CloudFront Distribution ID :: " + id + " Status : " + status
+           except botocore.exceptions.ClientError as e:
+             if "NoSuchDistribution" in str(e):
+               print("NoSuchDistribution")
+             else:
+               print(e)
+           return distribution_obj
+
+         def publish_sns(topicarn, subject, message):
+           response = sns.publish(
+             TargetArn=topicarn,
+             Subject=subject,
+             Message=message
+           )
+           print(response)
+
+  Primerinvoke:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: CldFrontGetDistributionStatusLambdaFunction
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt CldFrontGetDistributionStatusLambdaFunction.Arn
+
+  CldFrontLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: ['sts:AssumeRole']
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: CldFrontLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: cldfront
+                Effect: Allow
+                Action:
+                  - 'cloudfront:GetDistribution'
+                  - 'acm:ListCertificates'
+                  - 'SNS:Publish'
+                Resource: '*'

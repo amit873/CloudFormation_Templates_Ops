@@ -1,0 +1,92 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Operations: Alert topic template'
+Parameters:
+  S3BucketServiceLimit:
+    Type: String
+    Description: Provide valid Service limit of the S3 buckets
+    Default: ''
+  SNSTopicARN:
+    Type: String
+    Description: Provide valid SNS topic ARN
+    Default: ''
+
+Resources:
+  ListBucketLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !Sub '${ListBucketLambdaExecutionRole.Arn}'
+      Handler: index.lambda_handler
+      Timeout: 5
+      Runtime: python3.7
+      Environment:
+        Variables:
+          S3BucketServiceLimit: !Ref S3BucketServiceLimit
+          SNSTopicARN: !Ref SNSTopicARN
+      Code:
+        ZipFile: !Sub |
+         import json
+         import os, boto3, botocore
+         import cfnresponse
+         s3 = boto3.client('s3')
+         sns = boto3.client('sns')
+         def lambda_handler(event, context):
+           S3BucketServiceLimit = int(os.environ['S3BucketServiceLimit'])
+           print("S3BucketServiceLimit :: " + str(S3BucketServiceLimit))
+           warning_threshold = S3BucketServiceLimit * float('0.8')
+           SNSTopicARN = os.environ['SNSTopicARN']
+           print(SNSTopicARN)
+           bucket_count = get_bucket_count()
+           if (bucket_count >= warning_threshold):
+              subject = "S3 Service Limits Warning"
+              message = "There are currently " + str(bucket_count) + " buckets. The Service Limit is " + str(S3BucketServiceLimit) + ". Time to request the service limit."
+              publish_sns(topicarn=SNSTopicARN, subject=subject, message=message)
+           cfnresponse.send(event, context, cfnresponse.SUCCESS, None)
+
+         def get_bucket_count():
+           bucket_count = 0
+           try:
+             response = s3.list_buckets()
+             bucket_count = len(response['Buckets'])
+           except botocore.exceptions.ClientError as e:
+             if "AccessDenied" in str(e):
+               print("AccessDenied")
+           return bucket_count
+           
+         def publish_sns(topicarn, subject, message):
+           response = sns.publish(
+             TargetArn=topicarn,
+             Subject=subject,
+             Message=message
+           )
+           print(response)
+
+  Primerinvoke:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: ListBucketLambdaFunction
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt ListBucketLambdaFunction.Arn
+
+  ListBucketLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: ['sts:AssumeRole']
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: ListBucketPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: s3
+                Effect: Allow
+                Action:
+                  - 's3:ListBucket'
+                  - 's3:ListAllMyBuckets'
+                  - 'SNS:Publish'
+                Resource: '*'

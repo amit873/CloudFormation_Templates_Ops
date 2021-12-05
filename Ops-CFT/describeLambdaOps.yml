@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Operations: Alert topic template'
+Parameters:
+  LambdaFunctionName:
+    Type: String
+    Description: Provide valid name of the lambda function
+    Default: ''
+  SNSTopicARN:
+    Type: String
+    Description: Provide valid SNS topic ARN
+    Default: ''
+
+Resources:
+  DescribeLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !Sub '${ListLambdaExecutionRole.Arn}'
+      Handler: index.lambda_handler
+      Timeout: 5
+      Runtime: python3.7
+      Environment:
+        Variables:
+          LambdaFunctionName: !Ref LambdaFunctionName
+          SNSTopicARN: !Ref SNSTopicARN
+      Code:
+        ZipFile: !Sub |
+         import json
+         import os, boto3, botocore
+         import cfnresponse
+         from datetime import datetime
+         lambda_client = boto3.client('lambda')
+         logs_client = boto3.client('logs')
+         sns = boto3.client('sns')
+         def lambda_handler(event, context):
+           LambdaFunctionName = os.environ['LambdaFunctionName']
+           print("LambdaFunctionName :: " + LambdaFunctionName)
+           SNSTopicARN = os.environ['SNSTopicARN']
+           print(SNSTopicARN)
+           function_obj = describe_lambda(function_name=LambdaFunctionName)
+           subject = "Lambda function description"
+           message = ""
+           if function_obj == None :
+              message = "Function Not Found"
+           else:
+              message = function_obj
+           publish_sns(topicarn=SNSTopicARN, subject=subject, message=message)
+           cfnresponse.send(event, context, cfnresponse.SUCCESS, None)
+
+         def describe_lambda(function_name):
+           function_obj = None
+           try:
+             response = lambda_client.get_function(
+               FunctionName=function_name
+             )
+             last_modified = response.get('Configuration').get('LastModified')
+             last_invocation = datetime.fromtimestamp(get_last_invocation(function_name=function_name)/1000.0)
+             function_obj = "Function Name : " + function_name + " | LastModified : " + last_modified + " | Last Invocation : " + str(last_invocation)
+           except botocore.exceptions.ClientError as e:
+             if "AccessDenied" in str(e):
+               print("AccessDenied")
+           print(function_obj)
+           return function_obj
+         
+         def get_last_invocation(function_name):
+           last_invocation = -1
+           try:
+             logs = logs_client.describe_log_streams(
+               logGroupName='/aws/lambda/{0}'.format(function_name),
+               orderBy='LastEventTime',
+               descending=True
+             )
+           except botocore.exceptions.ClientError as e:
+             print(e)
+             return last_invocation
+           log_streams_timestamp = [
+             log.get('lastEventTimestamp', 0) for log in logs['logStreams']
+           ]
+           if log_streams_timestamp:
+             last_invocation = max(log_streams_timestamp)
+           return last_invocation
+
+         def publish_sns(topicarn, subject, message):
+           response = sns.publish(
+             TargetArn=topicarn,
+             Subject=subject,
+             Message=message
+           )
+           print(response)
+
+  Primerinvoke:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: DescribeLambdaFunction
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt DescribeLambdaFunction.Arn
+
+  ListLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: ['sts:AssumeRole']
+      ManagedPolicyArns: [!Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole']
+      Policies:
+        - PolicyName: DescribeLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: lambda
+                Effect: Allow
+                Action:
+                  - 'lambda:GetFunction'
+                  - 'SNS:Publish'
+                  - 'logs:DescribeLogStreams'
+                Resource: '*'
